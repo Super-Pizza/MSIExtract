@@ -177,6 +177,49 @@ fn main() {
         let ty = get_u16(&columns, i * 2 + row_count * 6);
         column_list.push((table, number, name, ty));
     }
+    let directories = fs::read(dir.clone() + "/Directory").unwrap();
+    let columns = get_columns("Directory", &string_list, &column_list);
+    let row_length = columns.last().unwrap().1 + columns.last().unwrap().2;
+    let row_count = directories.len() / row_length as usize;
+    let mut directory_list = HashMap::new();
+    for i in 0..row_count {
+        let directory_offs = get_val(&directories, i, 0, row_count, 2);
+        let parent_offs = get_val(&directories, i, columns[1].1 as usize, row_count, 2);
+        let dir_default_offs = get_val(&directories, i, columns[2].1 as usize, row_count, 2);
+        directory_list.insert(
+            string_list[directory_offs as usize].as_str(),
+            (
+                string_list[parent_offs as usize].as_str(),
+                string_list[dir_default_offs as usize].as_str(),
+            ),
+        );
+    }
+    let mut directory_full_list = HashMap::new();
+    for (dir, (parent, name)) in directory_list.clone() {
+        let mut full_path = String::new();
+        let mut parent = parent;
+        let mut name = name;
+        while parent != "TARGET_DIR" && !parent.is_empty() {
+            full_path.insert(0, '/');
+            full_path.insert_str(0, name.split_once('|').unwrap_or((name, name)).1);
+            (parent, name) = *directory_list.get(parent).unwrap();
+        }
+        directory_full_list.insert(dir, full_path);
+    }
+    let component = fs::read(dir.clone() + "/Component").unwrap();
+    let columns = get_columns("Component", &string_list, &column_list);
+    let row_length = columns.last().unwrap().1 + columns.last().unwrap().2;
+    let row_count = component.len() / row_length as usize;
+    let mut component_list = HashMap::new();
+    for i in 0..row_count {
+        let component_offs = get_val(&component, i, 0, row_count, 2);
+        let directory_offs = get_val(&component, i, columns[2].1 as usize, row_count, 2);
+        let directory = string_list[directory_offs as usize].as_str();
+        component_list.insert(
+            string_list[component_offs as usize].as_str(),
+            directory_full_list.get(directory).unwrap().as_str(),
+        );
+    }
     let files = fs::read(dir.clone() + "/File").unwrap();
     let columns = get_columns("File", &string_list, &column_list);
     let row_length = columns.last().unwrap().1 + columns.last().unwrap().2;
@@ -185,18 +228,17 @@ fn main() {
     for i in 0..row_count {
         let file_offs = get_val(&files, i, 0, row_count, 2);
         let filename_offs = get_val(&files, i, columns[2].1 as usize, row_count, 2);
-        println!(
-            "File: {} = {}",
-            string_list[file_offs as usize], string_list[filename_offs as usize]
-        );
         let filename = &string_list[filename_offs as usize];
+        let component_offs = get_val(&files, i, columns[1].1 as usize, row_count, 2);
+        let component = &string_list[component_offs as usize];
+        let long_filename = filename
+            .split_once('|')
+            .map(|v| v.1)
+            .unwrap_or(filename)
+            .to_owned();
         file_names.insert(
             string_list[file_offs as usize].as_str(),
-            filename
-                .split_once('|')
-                .map(|v| v.1)
-                .unwrap_or(filename)
-                .to_owned(),
+            (*component_list.get(component.as_str()).unwrap()).to_owned() + long_filename.as_str(),
         );
     }
     if let Ok(media) = fs::read(dir.clone() + "/Media") {
@@ -220,14 +262,13 @@ fn main() {
     }
     for cab in cabs {
         println!("Extracting cabinet: {cab}");
-        fs::create_dir(cab.trim_end_matches(".cab")).unwrap();
+        let base = std::path::Path::new(&cab).parent().unwrap();
         let mut cabinet = cab::Cabinet::new(fs::File::open(&cab).unwrap()).unwrap();
         for (path, name) in &file_names {
             println!("{name}");
             if let Ok(mut reader) = cabinet.read_file(path) {
-                let mut writer =
-                    fs::File::create(cab.trim_end_matches(".cab").to_owned() + "/" + &name)
-                        .unwrap();
+                fs::create_dir_all(base.join("Files").join(name).parent().unwrap()).unwrap();
+                let mut writer = fs::File::create(base.join("Files").join(name)).unwrap();
                 std::io::copy(&mut reader, &mut writer).unwrap();
             }
         }
