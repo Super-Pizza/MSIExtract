@@ -1,11 +1,11 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, fs, io, path::Path};
 
-fn main() {
+fn main() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let file = args.last().unwrap();
     let temp_dir = Path::new(file).with_extension("tmp");
-    let data = std::fs::read(file).unwrap();
-    fs::create_dir(temp_dir.clone()).unwrap_or_default();
+    let data = fs::read(file).map_err(e("Reading MSI failed"))?;
+    fs::create_dir(temp_dir.clone()).map_err(e("Temp dir already exists?"))?;
     if data[0..8] != [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1] {
         panic!("Invalid header!")
     }
@@ -150,18 +150,21 @@ fn main() {
                 temp_dir.join(&entry_name),
                 &entry_data[0..entry_size as usize],
             )
-            .unwrap();
+            .map_err(e("Failed to write temp file"))?;
             if entry_name.contains(".cab") {
                 let parent = std::path::Path::new(&temp_dir).parent().unwrap();
-                fs::copy(temp_dir.join(&entry_name), parent.join(&entry_name)).unwrap();
+                fs::copy(temp_dir.join(&entry_name), parent.join(&entry_name))
+                    .map_err(e("Failed to move cabinet"))?;
                 cabinets.push(parent.join(&entry_name).to_string_lossy().into_owned());
             }
         }
         dir_sector = fat[dir_sector as usize];
     }
     // Now, extract & rename those files!
-    let string_data = fs::read(temp_dir.join("_StringData")).unwrap();
-    let string_pool = fs::read(temp_dir.join("_StringPool")).unwrap();
+    let string_data =
+        fs::read(temp_dir.join("_StringData")).map_err(e("Failed to read string data"))?;
+    let string_pool =
+        fs::read(temp_dir.join("_StringPool")).map_err(e("Failed to read string pool"))?;
     let mut offset = 0;
     let mut strings = vec![String::new()];
     for index in 1..string_pool.len() / 4 {
@@ -171,7 +174,7 @@ fn main() {
         strings.push(data);
         offset += len as usize;
     }
-    let columns = fs::read(temp_dir.join("_Columns")).unwrap();
+    let columns = fs::read(temp_dir.join("_Columns")).map_err(e("Failed to read column data"))?;
     let row_count = columns.len() / 8;
     let mut column_list = vec![];
     for i in 0..row_count {
@@ -181,7 +184,8 @@ fn main() {
         let ty = get_u16(&columns, i * 2 + row_count * 6);
         column_list.push((table, number, name, ty));
     }
-    let directory_table = fs::read(temp_dir.join("Directory")).unwrap();
+    let directory_table =
+        fs::read(temp_dir.join("Directory")).map_err(e("Failed to read directory list"))?;
     let columns = get_columns("Directory", &strings, &column_list);
     let row_length = columns.last().unwrap().1 + columns.last().unwrap().2;
     let row_count = directory_table.len() / row_length as usize;
@@ -210,7 +214,8 @@ fn main() {
         }
         directory_map.insert(dir, full_path);
     }
-    let component_table = fs::read(temp_dir.join("Component")).unwrap();
+    let component_table =
+        fs::read(temp_dir.join("Component")).map_err(e("Failed to read component list"))?;
     let columns = get_columns("Component", &strings, &column_list);
     let row_length = columns.last().unwrap().1 + columns.last().unwrap().2;
     let row_count = component_table.len() / row_length as usize;
@@ -224,7 +229,7 @@ fn main() {
             directory_map.get(directory).unwrap().as_str(),
         );
     }
-    let file_table = fs::read(temp_dir.join("File")).unwrap();
+    let file_table = fs::read(temp_dir.join("File")).map_err(e("Failed to read file list"))?;
     let columns = get_columns("File", &strings, &column_list);
     let row_length = columns.last().unwrap().1 + columns.last().unwrap().2;
     let row_count = file_table.len() / row_length as usize;
@@ -261,17 +266,20 @@ fn main() {
     for cab in cabinets {
         println!("Extracting cabinet: {cab}");
         let base = Path::new(&cab).parent().unwrap();
-        let mut cabinet = cab::Cabinet::new(fs::File::open(&cab).unwrap()).unwrap();
+        let cab_file = fs::File::open(&cab).map_err(e("Failed to open cabinet"))?;
+        let mut cabinet = cab::Cabinet::new(cab_file).map_err(e("Failed to read cabinet"))?;
         for (path, name) in &files {
             println!("{name}");
             if let Ok(mut reader) = cabinet.read_file(path) {
-                fs::create_dir_all(base.join("Files").join(name).parent().unwrap()).unwrap();
-                let mut writer = fs::File::create(base.join("Files").join(name)).unwrap();
-                std::io::copy(&mut reader, &mut writer).unwrap();
+                fs::create_dir_all(base.join("Files").join(name).parent().unwrap())
+                    .map_err(e("Failed to create final directories"))?;
+                let mut writer = fs::File::create(base.join("Files").join(name))
+                    .map_err(e("Failed to create file"))?;
+                io::copy(&mut reader, &mut writer).map_err(e("Failed to copy file"))?;
             }
         }
     }
-    fs::remove_dir_all(temp_dir).unwrap();
+    fs::remove_dir_all(temp_dir).map_err(e("Failed to remove temp dir"))
 }
 fn get_u64(data: &[u8], offs: usize) -> u64 {
     u64::from_le_bytes([
@@ -325,4 +333,8 @@ fn get_columns(
             Some((v.2, old, size))
         })
         .collect::<Vec<_>>()
+}
+
+fn e<T: std::fmt::Debug>(help: &str) -> impl Fn(T) -> String + '_ {
+    move |e| format!("{help}: {e:?}")
 }
