@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fs, io, path::Path};
+use std::{
+    collections::HashMap,
+    ffi::{CStr, CString},
+    fs, io,
+    path::Path,
+};
 
 fn main() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -166,13 +171,21 @@ fn main() -> Result<(), String> {
     let string_pool =
         fs::read(temp_dir.join("_StringPool")).map_err(e("Failed to read string pool"))?;
     let mut offset = 0;
-    let mut strings = vec![String::new()];
-    for index in 1..string_pool.len() / 4 {
-        let len = get_u16(&string_pool, index * 4);
-        let data =
-            String::from_utf8(string_data[offset..offset + len as usize].to_owned()).unwrap();
+    let mut strings = vec![c"".to_owned()];
+    let mut index = 1;
+    while index < string_pool.len() / 4 {
+        let mut len = get_u16(&string_pool, index * 4) as usize;
+        let refs = get_u16(&string_pool, index * 4 + 2);
+        if len == 0 && refs != 0 {
+            index += 1;
+            len = ((get_u16(&string_pool, index * 4 + 2) as usize) << 16)
+                + get_u16(&string_pool, index * 4) as usize;
+        }
+        let vec_string = string_data[offset..offset + len as usize].to_owned();
+        let data = CString::new(vec_string).unwrap();
         strings.push(data);
         offset += len as usize;
+        index += 1;
     }
     let columns = fs::read(temp_dir.join("_Columns")).map_err(e("Failed to read column data"))?;
     let row_count = columns.len() / 8;
@@ -186,7 +199,7 @@ fn main() -> Result<(), String> {
     }
     let directory_table =
         fs::read(temp_dir.join("Directory")).map_err(e("Failed to read directory list"))?;
-    let columns = get_columns("Directory", &strings, &column_list);
+    let columns = get_columns(c"Directory", &strings, &column_list);
     let row_length = columns.last().unwrap().1 + columns.last().unwrap().2;
     let row_count = directory_table.len() / row_length as usize;
     let mut directories = HashMap::new();
@@ -195,49 +208,54 @@ fn main() -> Result<(), String> {
         let parent_offs = get_val(&directory_table, i, columns[1].1 as usize, row_count, 2);
         let dir_default_offs = get_val(&directory_table, i, columns[2].1 as usize, row_count, 2);
         directories.insert(
-            strings[directory_offs as usize].as_str(),
+            strings[directory_offs as usize].as_c_str(),
             (
-                strings[parent_offs as usize].as_str(),
-                strings[dir_default_offs as usize].as_str(),
+                strings[parent_offs as usize].as_c_str(),
+                strings[dir_default_offs as usize].as_c_str(),
             ),
         );
     }
     let mut directory_map = HashMap::new();
-    for (dir, (parent, name)) in directories.clone() {
+    for (dir, (parent, mut name)) in directories.clone() {
         let mut full_path = String::new();
         let mut parent = parent;
-        let mut name = name;
-        while parent != "TARGET_DIR" && !parent.is_empty() {
+        while parent != c"TARGET_DIR" && !parent.is_empty() {
             full_path.insert(0, '/');
-            full_path.insert_str(0, name.split_once('|').unwrap_or((name, name)).1);
+            full_path.insert_str(
+                0,
+                name.to_string_lossy()
+                    .split_once('|')
+                    .unwrap_or((&name.to_string_lossy(), &name.to_string_lossy()))
+                    .1,
+            );
             (parent, name) = *directories.get(parent).unwrap();
         }
         directory_map.insert(dir, full_path);
     }
     let component_table =
         fs::read(temp_dir.join("Component")).map_err(e("Failed to read component list"))?;
-    let columns = get_columns("Component", &strings, &column_list);
+    let columns = get_columns(c"Component", &strings, &column_list);
     let row_length = columns.last().unwrap().1 + columns.last().unwrap().2;
     let row_count = component_table.len() / row_length as usize;
     let mut components = HashMap::new();
     for i in 0..row_count {
         let component_offs = get_val(&component_table, i, 0, row_count, 2);
         let directory_offs = get_val(&component_table, i, columns[2].1 as usize, row_count, 2);
-        let directory = strings[directory_offs as usize].as_str();
+        let directory = strings[directory_offs as usize].as_c_str();
         components.insert(
-            strings[component_offs as usize].as_str(),
+            strings[component_offs as usize].as_c_str(),
             directory_map.get(directory).unwrap().as_str(),
         );
     }
     let file_table = fs::read(temp_dir.join("File")).map_err(e("Failed to read file list"))?;
-    let columns = get_columns("File", &strings, &column_list);
+    let columns = get_columns(c"File", &strings, &column_list);
     let row_length = columns.last().unwrap().1 + columns.last().unwrap().2;
     let row_count = file_table.len() / row_length as usize;
     let mut files = HashMap::new();
     for i in 0..row_count {
         let file_offs = get_val(&file_table, i, 0, row_count, 2);
         let filename_offs = get_val(&file_table, i, columns[2].1 as usize, row_count, 2);
-        let filename = &strings[filename_offs as usize];
+        let filename = &strings[filename_offs as usize].to_string_lossy();
         let component_offs = get_val(&file_table, i, columns[1].1 as usize, row_count, 2);
         let component = &strings[component_offs as usize];
         let long_filename = filename
@@ -246,31 +264,42 @@ fn main() -> Result<(), String> {
             .unwrap_or(filename)
             .to_owned();
         files.insert(
-            strings[file_offs as usize].as_str(),
-            (*components.get(component.as_str()).unwrap()).to_owned() + long_filename.as_str(),
+            strings[file_offs as usize].as_c_str(),
+            (*components.get(component.as_c_str()).unwrap()).to_owned() + long_filename.as_str(),
         );
     }
     if let Ok(media_table) = fs::read(temp_dir.join("Media")) {
-        let columns = get_columns("Media", &strings, &column_list);
+        let columns = get_columns(c"Media", &strings, &column_list);
         let row_length = columns.last().unwrap().1 + columns.last().unwrap().2;
         let row_count = media_table.len() / row_length as usize;
         for i in 0..row_count {
             let cabinet = get_val(&media_table, i, columns[3].1 as usize, row_count, 2);
             let cab_name = strings[cabinet as usize].clone();
-            if !cab_name.starts_with('#') && !cab_name.is_empty() {
+            if cab_name.as_bytes()[0] != b'#' && !cab_name.is_empty() {
                 let path = Path::new(&temp_dir).parent().unwrap();
-                cabinets.push(path.join(&cab_name).to_string_lossy().into_owned());
+                cabinets.push(
+                    path.join(cab_name.to_string_lossy().into_owned())
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            } else {
+                let path = Path::new(&temp_dir);
+                cabinets.push(
+                    path.join(&cab_name.to_string_lossy()[1..])
+                        .to_string_lossy()
+                        .into_owned(),
+                );
             }
         }
     }
     for cab in cabinets {
         println!("Extracting cabinet: {cab}");
-        let base = Path::new(&cab).parent().unwrap();
+        let base = Path::new(&temp_dir).parent().unwrap();
         let cab_file = fs::File::open(&cab).map_err(e("Failed to open cabinet"))?;
         let mut cabinet = cab::Cabinet::new(cab_file).map_err(e("Failed to read cabinet"))?;
-        for (path, name) in &files {
+        for (&path, name) in &files {
             println!("{name}");
-            if let Ok(mut reader) = cabinet.read_file(path) {
+            if let Ok(mut reader) = cabinet.read_file(&path.to_string_lossy()) {
                 fs::create_dir_all(base.join("Files").join(name).parent().unwrap())
                     .map_err(e("Failed to create final directories"))?;
                 let mut writer = fs::File::create(base.join("Files").join(name))
@@ -310,13 +339,13 @@ fn get_val(data: &[u8], row: usize, column_offs: usize, row_count: usize, size: 
 }
 
 fn get_columns(
-    name: &str,
-    strings: &[String],
+    name: &CStr,
+    strings: &[CString],
     column_list: &[(u16, u16, u16, u16)],
 ) -> Vec<(u16, u16, u16)> {
     let mut table_columns = column_list
         .iter()
-        .filter(|&v| strings[v.0 as usize] == name)
+        .filter(|&v| strings[v.0 as usize].as_c_str() == name)
         .collect::<Vec<_>>();
 
     table_columns.sort_by_key(|&v| v.1);
