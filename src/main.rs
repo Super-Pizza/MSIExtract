@@ -42,14 +42,14 @@ fn main() -> Result<(), String> {
             difat.push(difat_entry)
         }
     }
-    while difat_entry != 0xFFFFFFFE {
+    while difat_entry < 0xFFFFFFFB {
         for i in 0..sector_size / 4 - 1 {
             let difat_entry_int = get_u32(&data, sector_size * (difat_entry as usize + 1) + i * 4);
             if difat_entry_int != 0xFFFFFFFF {
                 difat.push(difat_entry_int)
             }
         }
-        difat_entry = get_u32(&data, sector_size * (difat_entry as usize + 1));
+        difat_entry = get_u32(&data, sector_size * (difat_entry as usize + 2)-4);
     }
     let mut fat = vec![];
     for difat_sector in difat {
